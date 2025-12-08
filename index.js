@@ -1,11 +1,30 @@
 const express = require("express");
 const mysql = require("mysql2/promise");
+const cors = require("cors");
+require('dotenv').config();
 const app = express();
 
 app.use(express.json());
+app.use(cors());
 
-// MySQL connection pool
-const pool = mysql.createPool({
+// Build pool config from environment. Support DATABASE_URL or individual DB_* vars.
+function parseDatabaseUrl(url) {
+  // expect mysql://user:pass@host:port/dbname
+  try {
+    const u = new URL(url);
+    return {
+      host: u.hostname,
+      port: u.port || 3306,
+      user: decodeURIComponent(u.username),
+      password: decodeURIComponent(u.password),
+      database: u.pathname ? u.pathname.replace(/^\//, '') : undefined
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+let poolConfig = {
   host: process.env.DB_HOST || "mysql",
   user: process.env.DB_USER || "ticketuser",
   password: process.env.DB_PASSWORD || "ticketpass123",
@@ -13,7 +32,17 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
-});
+};
+
+if (process.env.DATABASE_URL) {
+  const parsed = parseDatabaseUrl(process.env.DATABASE_URL);
+  if (parsed) {
+    poolConfig = { ...poolConfig, ...parsed };
+  }
+}
+
+// MySQL connection pool
+const pool = mysql.createPool(poolConfig);
 
 // Home route
 app.get("/", (req, res) => {
