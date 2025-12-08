@@ -1,48 +1,83 @@
 const express = require("express");
-const mysql = require("mysql2/promise");
+const sqlite3 = require("sqlite3").verbose();
 const cors = require("cors");
+const path = require("path");
 require('dotenv').config();
 const app = express();
 
 app.use(express.json());
 app.use(cors());
 
-// Build pool config from environment. Support DATABASE_URL or individual DB_* vars.
-function parseDatabaseUrl(url) {
-  // expect mysql://user:pass@host:port/dbname
-  try {
-    const u = new URL(url);
-    return {
-      host: u.hostname,
-      port: u.port || 3306,
-      user: decodeURIComponent(u.username),
-      password: decodeURIComponent(u.password),
-      database: u.pathname ? u.pathname.replace(/^\//, '') : undefined
-    };
-  } catch (e) {
-    return null;
+// Serve static files (index.html, CSS, JS, etc.)
+app.use(express.static(path.join(__dirname, '.')));
+
+// SQLite database setup
+const dbPath = path.join(__dirname, 'tickets.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error('Error opening database:', err);
+  } else {
+    console.log('Connected to SQLite database at:', dbPath);
+    initializeDatabase();
   }
+});
+
+// Initialize database schema and seed data
+function initializeDatabase() {
+  db.serialize(() => {
+    // Create tickets table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bus TEXT NOT NULL,
+        seat INTEGER NOT NULL,
+        price REAL NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (err) console.error('Error creating tickets table:', err);
+      else console.log('Tickets table ready');
+      
+      // Seed sample data if table is empty
+      db.get('SELECT COUNT(*) as count FROM tickets', (err, row) => {
+        if (row && row.count === 0) {
+          const sampleData = [
+            { bus: 'RITCO', seat: 12, price: 5000 },
+            { bus: 'Volcano', seat: 7, price: 4500 },
+            { bus: 'KBS', seat: 15, price: 4800 },
+            { bus: 'Easy Coach', seat: 22, price: 5200 },
+            { bus: 'Nairobi Express', seat: 8, price: 4700 }
+          ];
+          
+          sampleData.forEach(ticket => {
+            db.run(
+              'INSERT INTO tickets (bus, seat, price) VALUES (?, ?, ?)',
+              [ticket.bus, ticket.seat, ticket.price],
+              (err) => {
+                if (err) console.error('Error inserting sample data:', err);
+              }
+            );
+          });
+          console.log('Sample data inserted');
+        }
+      });
+    });
+
+    // Create users table (optional)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        phone TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (err) console.error('Error creating users table:', err);
+      else console.log('Users table ready');
+    });
+  });
 }
-
-let poolConfig = {
-  host: process.env.DB_HOST || "mysql",
-  user: process.env.DB_USER || "ticketuser",
-  password: process.env.DB_PASSWORD || "ticketpass123",
-  database: process.env.DB_NAME || "ticket_db",
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-};
-
-if (process.env.DATABASE_URL) {
-  const parsed = parseDatabaseUrl(process.env.DATABASE_URL);
-  if (parsed) {
-    poolConfig = { ...poolConfig, ...parsed };
-  }
-}
-
-// MySQL connection pool
-const pool = mysql.createPool(poolConfig);
 
 // Home route
 app.get("/", (req, res) => {
@@ -50,71 +85,68 @@ app.get("/", (req, res) => {
 });
 
 // Get all tickets
-app.get("/tickets", async (req, res) => {
-  try {
-    const connection = await pool.getConnection();
-    const [tickets] = await connection.query("SELECT * FROM tickets");
-    connection.release();
+app.get("/tickets", (req, res) => {
+  db.all("SELECT * FROM tickets ORDER BY id DESC", (err, rows) => {
+    if (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
     res.json({
       success: true,
-      data: tickets
+      data: rows || []
     });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  });
 });
 
 // Book a ticket
-app.post("/tickets", async (req, res) => {
+app.post("/tickets", (req, res) => {
   const { bus, seat, price } = req.body;
 
   if (!bus || !seat || !price) {
     return res.status(400).json({ success: false, message: "Missing fields" });
   }
 
-  try {
-    const connection = await pool.getConnection();
-    await connection.query("INSERT INTO tickets (bus, seat, price) VALUES (?, ?, ?)", [bus, seat, price]);
-    const [newTicket] = await connection.query("SELECT * FROM tickets ORDER BY id DESC LIMIT 1");
-    connection.release();
-    res.json({ success: true, data: newTicket[0] });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  db.run(
+    "INSERT INTO tickets (bus, seat, price) VALUES (?, ?, ?)",
+    [bus, seat, price],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ success: false, message: err.message });
+      }
+      
+      db.get("SELECT * FROM tickets WHERE id = ?", [this.lastID], (err, row) => {
+        if (err) {
+          return res.status(500).json({ success: false, message: err.message });
+        }
+        res.json({ success: true, data: row });
+      });
+    }
+  );
 });
 
 // Get single ticket
-app.get("/tickets/:id", async (req, res) => {
-  try {
-    const connection = await pool.getConnection();
-    const [ticket] = await connection.query("SELECT * FROM tickets WHERE id = ?", [req.params.id]);
-    connection.release();
-
-    if (!ticket || ticket.length === 0) {
+app.get("/tickets/:id", (req, res) => {
+  db.get("SELECT * FROM tickets WHERE id = ?", [req.params.id], (err, row) => {
+    if (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+    if (!row) {
       return res.status(404).json({ success: false, message: "Ticket not found" });
     }
-
-    res.json({ success: true, data: ticket[0] });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    res.json({ success: true, data: row });
+  });
 });
 
 // Delete a ticket
-app.delete("/tickets/:id", async (req, res) => {
-  try {
-    const connection = await pool.getConnection();
-    const [result] = await connection.query("DELETE FROM tickets WHERE id = ?", [req.params.id]);
-    connection.release();
-
-    if (result.affectedRows === 0) {
+app.delete("/tickets/:id", (req, res) => {
+  db.run("DELETE FROM tickets WHERE id = ?", [req.params.id], function(err) {
+    if (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+    if (this.changes === 0) {
       return res.status(404).json({ success: false, message: "Ticket not found" });
     }
-
     res.json({ success: true, message: "Ticket deleted" });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  });
 });
 
 // Start server
