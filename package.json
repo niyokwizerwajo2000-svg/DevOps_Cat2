@@ -1,0 +1,28 @@
+{
+  "name": "ticket-booking-backend",
+  "version": "1.0.0",
+  "description": "A backend API for booking and managing bus tickets.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"No tests yet\""
+  },
+  "keywords": [
+    "ticket",
+    "booking",
+    "backend",
+    "express",
+    "api"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0",
+    "mysql2": "^3.6.5",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
