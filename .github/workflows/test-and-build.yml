@@ -9,6 +9,8 @@ on:
 env:
   NODE_VERSION: '18'
   REGISTRY: ghcr.io
+  # Always use lowercase for Docker image names
+  REPO_NAME: ${{ github.repository_owner }}/${{ github.event.repository.name }}
 
 jobs:
   test:
@@ -148,7 +150,7 @@ jobs:
         id: backend-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/backend
+          images: ${{ env.REGISTRY }}/${{ env.REPO_NAME }}/backend
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -164,14 +166,14 @@ jobs:
           push: true
           tags: ${{ steps.backend-meta.outputs.tags }}
           labels: ${{ steps.backend-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/backend:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/backend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}/backend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}/backend:buildcache,mode=max
 
       - name: Extract metadata for frontend
         id: frontend-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/frontend
+          images: ${{ env.REGISTRY }}/${{ env.REPO_NAME }}/frontend
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -187,8 +189,8 @@ jobs:
           push: true
           tags: ${{ steps.frontend-meta.outputs.tags }}
           labels: ${{ steps.frontend-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/frontend:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/frontend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}/frontend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}/frontend:buildcache,mode=max
 
   notify:
     name: Send Notifications
