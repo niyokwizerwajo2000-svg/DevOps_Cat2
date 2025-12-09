@@ -107,6 +107,8 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: success() && github.event_name == 'push'
+    outputs:
+      lower_repo: ${{ steps.lowercase-repo.outputs.lower_repo }}
 
     permissions:
       contents: read
