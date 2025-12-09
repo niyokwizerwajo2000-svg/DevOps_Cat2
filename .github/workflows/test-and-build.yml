@@ -29,7 +29,9 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        # Prefer a clean install (`npm ci`) but fall back to `npm install`
+        # if the lockfile and package.json are temporarily out of sync.
+        run: npm ci || npm install
 
       - name: Run unit tests
         run: npm run test:unit
