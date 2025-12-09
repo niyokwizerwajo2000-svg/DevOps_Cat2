@@ -22,6 +22,10 @@ jobs:
         run: |
           echo "Deploying ${{ github.event.workflow_run.head_commit }} to production..."
           # Add your deployment commands here
+          # Examples:
+          # - kubectl apply -f k8s/
+          # - docker pull && docker run
+          # - ansible-playbook deploy.yml
 
       - name: Send deployment notification
         if: always()
@@ -59,25 +63,45 @@ jobs:
           }'
           curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
 
-      - name: Send email alert (optional)
-        if: env.EMAIL_ALERT_ENABLED == 'true'
-        uses: dawidd6/action-send-mail@v3
+      - name: Send email alert (if configured)
+        if: always()
+        run: |
+          if [ -z "${{ secrets.EMAIL_SERVER }}" ] || [ -z "${{ secrets.EMAIL_USERNAME }}" ] || [ -z "${{ secrets.EMAIL_PASSWORD }}" ] || [ -z "${{ secrets.EMAIL_RECIPIENTS }}" ]; then
+            echo "SKIP: Email credentials not fully configured, not sending email alert."
+            exit 0
+          fi
+          
+          SUBJECT="⚠️ CI Pipeline Failed - ${{ github.repository }}"
+          BODY="Pipeline Failed!\\n\\nRepository: ${{ github.repository }}\\nWorkflow: ${{ github.event.workflow_run.name }}\\nBranch: ${{ github.event.workflow_run.head_branch }}\\nCommit: ${{ github.event.workflow_run.head_commit }}\\n\\nAction Required: Please review the workflow logs immediately.\\n\\nView details: ${{ github.event.workflow_run.html_url }}"
+          
+          echo "Email alert would be sent to: ${{ secrets.EMAIL_RECIPIENTS }}"
+          echo "Subject: $SUBJECT"
+          # Note: For actual email sending, use a GitHub Action or configure SMTP
+
+      - name: Create issue for failed workflow
+        if: always()
+        uses: actions/github-script@v7
         with:
-          server_address: ${{ secrets.EMAIL_SERVER }}
-          server_port: ${{ secrets.EMAIL_PORT }}
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "⚠️ CI Pipeline Failed - ${{ github.repository }}"
-          to: ${{ secrets.EMAIL_RECIPIENTS }}
-          from: "CI Pipeline <noreply@ci.example.com>"
-          body: |
-            Pipeline Failed!
-            
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.event.workflow_run.name }}
-            Branch: ${{ github.event.workflow_run.head_branch }}
-            Commit: ${{ github.event.workflow_run.head_commit }}
-            
-            Action Required: Please review the workflow logs immediately.
-            
-            View details: ${{ github.event.workflow_run.html_url }}
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Test & Build Failed - ${context.payload.workflow_run.head_commit.substring(0, 7)}`,
+              body: `## Pipeline Failure Report
+
+**Workflow:** ${{ github.event.workflow_run.name }}
+**Branch:** ${{ github.event.workflow_run.head_branch }}
+**Commit:** ${{ github.event.workflow_run.head_commit }}
+**Author:** ${{ github.event.workflow_run.actor.login }}
+
+[View Workflow Run](${{ github.event.workflow_run.html_url }})
+
+### Action Required
+Please review the workflow logs and fix the failing tests before merging.
+
+### Related
+- Workflow: ${{ github.event.workflow_run.html_url }}
+- Repository: ${{ github.repository }}`,
+              labels: ['bug', 'ci-failure']
+            });
+            console.log(`Created issue #${issue.data.number}`);

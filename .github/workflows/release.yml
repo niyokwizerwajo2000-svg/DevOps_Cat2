@@ -179,15 +179,10 @@ jobs:
           curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" "${{ secrets.SLACK_WEBHOOK_URL }}"
 
       - name: Send email notification
-        if: ${{ secrets.EMAIL_RECIPIENTS }}
-        uses: davismatejcs/gmail-action@v1
-        with:
-          to: ${{ secrets.EMAIL_RECIPIENTS }}
-          subject: "Release ${{ needs.parse-version.outputs.version }} Published"
-          body: |
-            Release ${{ needs.parse-version.outputs.version }} has been published!
-            
-            Backend Image: ${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
-            Frontend Image: ${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
-            
-            Release Details: https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}
+        run: |
+          if [ -z "${{ secrets.EMAIL_RECIPIENTS }}" ] || [ -z "${{ secrets.EMAIL_SERVER }}" ] || [ -z "${{ secrets.EMAIL_USERNAME }}" ] || [ -z "${{ secrets.EMAIL_PASSWORD }}" ]; then
+            echo "SKIP: Email credentials not configured, not sending email notification."
+            exit 0
+          fi
+          # Email sending logic here (requires SMTP configuration)
+          echo "Email notification would be sent to: ${{ secrets.EMAIL_RECIPIENTS }}"
