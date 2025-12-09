@@ -1,0 +1,97 @@
+name: Deploy & Notify
+
+on:
+  workflow_run:
+    workflows: ["Test & Build"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Deploy to environment
+        run: |
+          echo "Deploying ${{ github.event.workflow_run.head_commit }} to production..."
+          # Add your deployment commands here
+
+      - name: Send deployment notification
+        uses: slackapi/slack-github-action@v1.24.0
+        if: always()
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "🚀 Deployment Status",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🚀 *Deployment Complete*\n*Environment:* Production\n*Branch:* main\n*Commit:* ${{ github.event.workflow_run.head_commit }}"
+                  }
+                }
+              ]
+            }
+
+  notify-failure:
+    name: Notify on Test Failure
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'failure'
+
+    steps:
+      - name: Send failure notification to Slack
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "⚠️ Pipeline Failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️ *Pipeline Failed - Manual Intervention Needed*\n*Workflow:* ${{ github.event.workflow_run.name }}\n*Branch:* ${{ github.event.workflow_run.head_branch }}\n*Commit:* ${{ github.event.workflow_run.head_commit }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "<${{ github.event.workflow_run.html_url }}|View Workflow>"
+                  }
+                }
+              ]
+            }
+
+      - name: Send email alert (optional)
+        if: env.EMAIL_ALERT_ENABLED == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.EMAIL_SERVER }}
+          server_port: ${{ secrets.EMAIL_PORT }}
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "⚠️ CI Pipeline Failed - ${{ github.repository }}"
+          to: ${{ secrets.EMAIL_RECIPIENTS }}
+          from: "CI Pipeline <noreply@ci.example.com>"
+          body: |
+            Pipeline Failed!
+            
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.event.workflow_run.name }}
+            Branch: ${{ github.event.workflow_run.head_branch }}
+            Commit: ${{ github.event.workflow_run.head_commit }}
+            
+            Action Required: Please review the workflow logs immediately.
+            
+            View details: ${{ github.event.workflow_run.html_url }}

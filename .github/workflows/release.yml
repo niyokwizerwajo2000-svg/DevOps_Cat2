@@ -1,0 +1,181 @@
+name: Release & Deploy
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Semantic versioning: v1.0.0, v1.0.1, etc.
+
+env:
+  REGISTRY: docker.io
+  BACKEND_IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend
+  FRONTEND_IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend
+
+jobs:
+  # Parse version from git tag
+  parse-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      major: ${{ steps.get-version.outputs.major }}
+      minor: ${{ steps.get-version.outputs.minor }}
+      patch: ${{ steps.get-version.outputs.patch }}
+    steps:
+      - name: Get version from tag
+        id: get-version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Extract major.minor.patch
+          MAJOR=$(echo $VERSION | cut -d'.' -f1 | sed 's/v//')
+          MINOR=$(echo $VERSION | cut -d'.' -f2)
+          PATCH=$(echo $VERSION | cut -d'.' -f3)
+          
+          echo "major=${MAJOR}" >> $GITHUB_OUTPUT
+          echo "minor=${MINOR}" >> $GITHUB_OUTPUT
+          echo "patch=${PATCH}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+  # Build and push Docker images
+  build-and-push:
+    needs: parse-version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: ./Dockerfile
+            image-name: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend
+            context: .
+          - dockerfile: ./frontend/Dockerfile
+            image-name: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend
+            context: .
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ matrix.image-name }}:${{ needs.parse-version.outputs.version }}
+            ${{ matrix.image-name }}:latest
+          cache-from: type=registry,ref=${{ matrix.image-name }}:buildcache
+          cache-to: type=registry,ref=${{ matrix.image-name }}:buildcache,mode=max
+
+  # Generate changelog from commits since last tag
+  generate-changelog:
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.generate.outputs.changelog }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
+
+      - name: Generate changelog
+        id: generate
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          
+          echo "Generating changelog from $PREV_TAG to $CURRENT_TAG"
+          
+          if [ -z "$PREV_TAG" ]; then
+            # First release
+            CHANGELOG=$(git log --pretty=format:"- %s" HEAD)
+          else
+            # Subsequent releases
+            CHANGELOG=$(git log $PREV_TAG..$CURRENT_TAG --pretty=format:"- %s")
+          fi
+          
+          # Format for output
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          
+          echo "changelog=$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "Generated changelog:"
+          echo "$CHANGELOG"
+
+  # Create GitHub Release with changelog
+  create-release:
+    needs: [parse-version, generate-changelog, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.parse-version.outputs.version }}
+          name: Release ${{ needs.parse-version.outputs.version }}
+          body: |
+            ## Release ${{ needs.parse-version.outputs.version }}
+            
+            ### What's Changed
+            ${{ needs.generate-changelog.outputs.changelog }}
+            
+            ### Docker Images
+            - Backend: `${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
+            - Frontend: `${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
+            
+            ### Pull Docker Images
+            \`\`\`bash
+            docker pull ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
+            docker pull ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
+            \`\`\`
+            
+            ### Run with Docker Compose
+            Update your docker-compose.yml to use the new images:
+            \`\`\`yaml
+            app:
+              image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
+            frontend:
+              image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
+            \`\`\`
+          draft: false
+          prerelease: false
+
+  # Notify team of release
+  notify-release:
+    needs: [parse-version, create-release]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify Slack
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        run: |
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}"
+          MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Send email notification
+        if: ${{ secrets.EMAIL_RECIPIENTS != '' }}
+        uses: davismatejcs/gmail-action@v1
+        with:
+          to: ${{ secrets.EMAIL_RECIPIENTS }}
+          subject: "Release ${{ needs.parse-version.outputs.version }} Published"
+          body: |
+            Release ${{ needs.parse-version.outputs.version }} has been published!
+            
+            Backend Image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
+            Frontend Image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
+            
+            Release Details: https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}
