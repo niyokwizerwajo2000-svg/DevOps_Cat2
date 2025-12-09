@@ -4,11 +4,11 @@ on:
   push:
     tags:
       - 'v*.*.*'  # Semantic versioning: v1.0.0, v1.0.1, etc.
+  # Allow manual runs for testing
+  workflow_dispatch: {}
 
 env:
   REGISTRY: docker.io
-  BACKEND_IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend
-  FRONTEND_IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend
 
 jobs:
   # Parse version from git tag
@@ -36,10 +36,11 @@ jobs:
           echo "patch=${PATCH}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION}"
 
-  # Build and push Docker images
+  # Build and push Docker images (only if Docker Hub credentials configured)
   build-and-push:
     needs: parse-version
     runs-on: ubuntu-latest
+    if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
     strategy:
       matrix:
         include:
@@ -73,6 +74,25 @@ jobs:
             ${{ matrix.image-name }}:latest
           cache-from: type=registry,ref=${{ matrix.image-name }}:buildcache
           cache-to: type=registry,ref=${{ matrix.image-name }}:buildcache,mode=max
+
+  # Log if Docker credentials are missing
+  check-docker-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Docker Hub credentials
+        if: ${{ secrets.DOCKER_USERNAME == '' || secrets.DOCKER_PASSWORD == '' }}
+        run: |
+          echo "⚠️  Docker Hub credentials not configured."
+          echo "To push images to Docker Hub, configure GitHub Secrets:"
+          echo "  - DOCKER_USERNAME (your Docker Hub username)"
+          echo "  - DOCKER_PASSWORD (your Docker Hub access token or password)"
+          echo ""
+          echo "Steps to configure:"
+          echo "  1. Go to repo Settings → Secrets and Variables → Actions"
+          echo "  2. Click 'New repository secret'"
+          echo "  3. Add DOCKER_USERNAME and DOCKER_PASSWORD"
+          echo ""
+          echo "Release will continue without Docker push."
 
   # Generate changelog from commits since last tag
   generate-changelog:
@@ -112,7 +132,7 @@ jobs:
 
   # Create GitHub Release with changelog
   create-release:
-    needs: [parse-version, generate-changelog, build-and-push]
+    needs: [parse-version, generate-changelog]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -130,23 +150,25 @@ jobs:
             ${{ needs.generate-changelog.outputs.changelog }}
             
             ### Docker Images
-            - Backend: `${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
-            - Frontend: `${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
+            Docker images available at:
+            - Backend: `docker.io/<username>/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
+            - Frontend: `docker.io/<username>/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
             
-            ### Pull Docker Images
-            \`\`\`bash
-            docker pull ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
-            docker pull ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
-            \`\`\`
+            (Replace `<username>` with your Docker Hub username)
+            
+            ### Build Docker Images Locally
+            ```bash
+            # Backend
+            docker build -t ticket-booking-backend:${{ needs.parse-version.outputs.version }} .
+            
+            # Frontend
+            docker build -t ticket-booking-frontend:${{ needs.parse-version.outputs.version }} ./frontend
+            ```
             
             ### Run with Docker Compose
-            Update your docker-compose.yml to use the new images:
-            \`\`\`yaml
-            app:
-              image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
-            frontend:
-              image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
-            \`\`\`
+            Update your docker-compose.yml to use the new version tag or build from this release.
+            
+            **Note:** Docker Hub push requires DOCKER_USERNAME and DOCKER_PASSWORD secrets configured in GitHub.
           draft: false
           prerelease: false
 
