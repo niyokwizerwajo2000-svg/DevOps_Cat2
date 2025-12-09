@@ -12,6 +12,12 @@
     "test:all": "jest --verbose --coverage",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
+    ,"bump:patch": "bash scripts/bump-version.sh patch --yes"
+    ,"bump:minor": "bash scripts/bump-version.sh minor --yes"
+    ,"bump:major": "bash scripts/bump-version.sh major --yes"
+    ,"release:patch": "npm run bump:patch && bash scripts/create-and-push-tag.sh"
+    ,"release:minor": "npm run bump:minor && bash scripts/create-and-push-tag.sh"
+    ,"release:major": "npm run bump:major && bash scripts/create-and-push-tag.sh"
   },
   "keywords": [
     "ticket",

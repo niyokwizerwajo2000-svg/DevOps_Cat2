@@ -71,12 +71,16 @@ increment_version() {
 
 # Main script
 main() {
-    if [ $# -ne 1 ]; then
-        print_error "Usage: $0 <major|minor|patch>"
+    if [ $# -lt 1 ]; then
+        print_error "Usage: $0 <major|minor|patch> [--yes|-y]"
         exit 1
     fi
-    
+
     local bump_type=$1
+    local auto_confirm=false
+    if [ "$2" = "--yes" ] || [ "$2" = "-y" ]; then
+        auto_confirm=true
+    fi
     
     # Validate input
     if [[ ! "$bump_type" =~ ^(major|minor|patch)$ ]]; then
@@ -103,14 +107,18 @@ main() {
     local new_version=$(increment_version "$current_version" "$bump_type")
     print_info "New version: $new_version"
     
-    # Confirm with user
-    echo ""
-    read -p "$(echo -e ${YELLOW}Bump version from $current_version to $new_version? \(y/n\) ${NC})" -n 1 -r
-    echo
-    
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_warning "Cancelled."
-        exit 0
+    # Confirm with user (unless auto-confirmed)
+    if [ "$auto_confirm" = false ]; then
+        echo ""
+        read -p "$(echo -e ${YELLOW}Bump version from $current_version to $new_version? \(y/n\) ${NC})" -n 1 -r
+        echo
+
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_warning "Cancelled."
+            exit 0
+        fi
+    else
+        print_info "Auto-confirm enabled; proceeding with bump."
     fi
     
     # Update backend package.json
