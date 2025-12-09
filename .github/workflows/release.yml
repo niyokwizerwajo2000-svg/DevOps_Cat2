@@ -169,13 +169,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack
-        if: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending release notification."
+            exit 0
+          fi
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}"
           MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
-          curl -X POST -H 'Content-type: application/json' \
-            --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
+          curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" "${{ secrets.SLACK_WEBHOOK_URL }}"
 
       - name: Send email notification
         if: ${{ secrets.EMAIL_RECIPIENTS }}

@@ -71,56 +71,36 @@ jobs:
           echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Send Slack notification on failure
-        if: failure() && env.SLACK_WEBHOOK_URL != ''
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
-          payload: |
-            {
-              "text": "❌ Tests Failed on ${{ github.ref_name }}",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "❌ *Test Pipeline Failed*\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Repository:* ${{ github.repository }}"
-                  }
-                },
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
-                  }
-                }
-              ]
-            }
+        if: failure()
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending failure notification."
+            exit 0
+          fi
+          payload='{
+            "text":"❌ Tests Failed on ${{ github.ref_name }}",
+            "blocks":[
+              {"type":"section","text":{"type":"mrkdwn","text":"❌ *Test Pipeline Failed*\\n*Branch:* ${{ github.ref_name }}\\n*Commit:* ${{ github.sha }}\\n*Repository:* ${{ github.repository }}" }},
+              {"type":"section","text":{"type":"mrkdwn","text":"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>" }}
+            ]
+          }'
+          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
 
       - name: Send Slack notification on success
-        if: success() && env.SLACK_WEBHOOK_URL != ''
-        uses: slackapi/slack-github-action@v1.24.0
-        with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
-          payload: |
-            {
-              "text": "✅ Tests Passed on ${{ github.ref_name }}",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "✅ *All Tests Passed*\n*Branch:* ${{ github.ref_name }}\n*Coverage:* ${{ steps.test-results.outputs.coverage }}%\n*Repository:* ${{ github.repository }}"
-                  }
-                },
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
-                  }
-                }
-              ]
-            }
+        if: success()
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending success notification."
+            exit 0
+          fi
+          payload='{
+            "text":"✅ Tests Passed on ${{ github.ref_name }}",
+            "blocks":[
+              {"type":"section","text":{"type":"mrkdwn","text":"✅ *All Tests Passed*\\n*Branch:* ${{ github.ref_name }}\\n*Coverage:* ${{ steps.test-results.outputs.coverage }}%\\n*Repository:* ${{ github.repository }}" }},
+              {"type":"section","text":{"type":"mrkdwn","text":"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>" }}
+            ]
+          }'
+          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
 
   build:
     name: Build Docker Images
@@ -136,6 +116,30 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Compute lowercase repository name (for Docker refs)
+        id: lowercase-repo
+        run: |
+          # Compute a fully-lowercase repository owner/name to satisfy Docker/OCI
+          REPO_RAW='${{ github.repository }}'
+          REPO_LOWER=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+          # Export as a step output so later actions can reference it in expressions
+          echo "lower_repo=$REPO_LOWER" >> $GITHUB_OUTPUT
+          echo "Computed lower_repo=$REPO_LOWER"
+
+      - name: Debug: show computed Docker refs
+        run: |
+          echo "Computed LOWER_REPO: ${{ steps.lowercase-repo.outputs.lower_repo }}"
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Backend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend"
+          echo "Frontend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend"
+          echo "Backend cache ref: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache"
+          echo "Frontend cache ref: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache"
+          # Fail early if LOWER_REPO contains uppercase characters (safety check)
+          if echo "${{ steps.lowercase-repo.outputs.lower_repo }}" | grep '[A-Z]' >/dev/null; then
+            echo "ERROR: LOWER_REPO contains uppercase characters"
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -150,7 +154,7 @@ jobs:
         id: backend-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.REPO_NAME }}-backend
+          images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -166,14 +170,14 @@ jobs:
           push: true
           tags: ${{ steps.backend-meta.outputs.tags }}
           labels: ${{ steps.backend-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}-backend:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}-backend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache,mode=max
 
       - name: Extract metadata for frontend
         id: frontend-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.REPO_NAME }}-frontend
+          images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -189,8 +193,8 @@ jobs:
           push: true
           tags: ${{ steps.frontend-meta.outputs.tags }}
           labels: ${{ steps.frontend-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}-frontend:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.REPO_NAME }}-frontend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache,mode=max
 
   notify:
     name: Send Notifications
