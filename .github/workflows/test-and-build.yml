@@ -124,23 +124,24 @@ jobs:
           # Compute a fully-lowercase repository owner/name to satisfy Docker/OCI
           REPO_RAW='${{ github.repository }}'
           REPO_LOWER=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
-          # Export as a step output so later actions can reference it in expressions
+          # Export as a step output AND to GITHUB_ENV for later steps
           echo "lower_repo=$REPO_LOWER" >> $GITHUB_OUTPUT
-          echo "Computed lower_repo=$REPO_LOWER"
+          echo "LOWER_REPO=$REPO_LOWER" >> $GITHUB_ENV
+          echo "Computed lowercase repo: $REPO_LOWER"
+          # Fail early if uppercase characters exist
+          if echo "$REPO_LOWER" | grep '[A-Z]' >/dev/null; then
+            echo "ERROR: Lowercase conversion failed, repo still has uppercase"
+            exit 1
+          fi
 
       - name: Debug: show computed Docker refs
         run: |
-          echo "Computed LOWER_REPO: ${{ steps.lowercase-repo.outputs.lower_repo }}"
+          echo "Computed LOWER_REPO: ${{ env.LOWER_REPO }}"
           echo "Registry: ${{ env.REGISTRY }}"
-          echo "Backend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend"
-          echo "Frontend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend"
-          echo "Backend cache ref: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache"
-          echo "Frontend cache ref: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache"
-          # Fail early if LOWER_REPO contains uppercase characters (safety check)
-          if echo "${{ steps.lowercase-repo.outputs.lower_repo }}" | grep '[A-Z]' >/dev/null; then
-            echo "ERROR: LOWER_REPO contains uppercase characters"
-            exit 1
-          fi
+          echo "Backend image will be: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/backend"
+          echo "Frontend image will be: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/frontend"
+          echo "Backend cache ref: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/backend:buildcache"
+          echo "Frontend cache ref: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/frontend:buildcache"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -156,7 +157,7 @@ jobs:
         id: backend-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend
+          images: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/backend
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -172,14 +173,14 @@ jobs:
           push: true
           tags: ${{ steps.backend-meta.outputs.tags }}
           labels: ${{ steps.backend-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/backend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/backend:buildcache,mode=max
 
       - name: Extract metadata for frontend
         id: frontend-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend
+          images: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/frontend
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -195,8 +196,8 @@ jobs:
           push: true
           tags: ${{ steps.frontend-meta.outputs.tags }}
           labels: ${{ steps.frontend-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/frontend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/frontend:buildcache,mode=max
 
   notify:
     name: Send Notifications
