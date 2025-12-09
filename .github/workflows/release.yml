@@ -25,32 +25,39 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          
-          # Extract major.minor.patch
           MAJOR=$(echo $VERSION | cut -d'.' -f1 | sed 's/v//')
           MINOR=$(echo $VERSION | cut -d'.' -f2)
           PATCH=$(echo $VERSION | cut -d'.' -f3)
-          
           echo "major=${MAJOR}" >> $GITHUB_OUTPUT
           echo "minor=${MINOR}" >> $GITHUB_OUTPUT
           echo "patch=${PATCH}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION}"
 
-  # Build and push Docker images (only if Docker Hub credentials configured)
+  # Build and push Docker images (always runs, but skips if secrets missing)
   build-and-push:
     needs: parse-version
     runs-on: ubuntu-latest
-    if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
     strategy:
       matrix:
         include:
           - dockerfile: ./Dockerfile
-            image-name: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend
+            image-name: ${{ env.DOCKER_USERNAME }}/ticket-booking-backend
             context: .
           - dockerfile: ./frontend/Dockerfile
-            image-name: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend
+            image-name: ${{ env.DOCKER_USERNAME }}/ticket-booking-frontend
             context: .
     steps:
+      - name: Check Docker Hub credentials
+        id: check-docker
+        run: |
+          if [ -z "${{ secrets.DOCKER_USERNAME }}" ] || [ -z "${{ secrets.DOCKER_PASSWORD }}" ]; then
+            echo "Docker credentials missing, skipping Docker build/push."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}" >> $GITHUB_ENV
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -58,12 +65,14 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: steps.check-docker.outputs.skip == 'false'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push Docker image
+        if: steps.check-docker.outputs.skip == 'false'
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
@@ -75,23 +84,13 @@ jobs:
           cache-from: type=registry,ref=${{ matrix.image-name }}:buildcache
           cache-to: type=registry,ref=${{ matrix.image-name }}:buildcache,mode=max
 
-  # Log if Docker credentials are missing
-  check-docker-config:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check Docker Hub credentials
-        if: ${{ secrets.DOCKER_USERNAME == '' || secrets.DOCKER_PASSWORD == '' }}
+      - name: Log if Docker credentials are missing
+        if: steps.check-docker.outputs.skip == 'true'
         run: |
           echo "⚠️  Docker Hub credentials not configured."
           echo "To push images to Docker Hub, configure GitHub Secrets:"
           echo "  - DOCKER_USERNAME (your Docker Hub username)"
           echo "  - DOCKER_PASSWORD (your Docker Hub access token or password)"
-          echo ""
-          echo "Steps to configure:"
-          echo "  1. Go to repo Settings → Secrets and Variables → Actions"
-          echo "  2. Click 'New repository secret'"
-          echo "  3. Add DOCKER_USERNAME and DOCKER_PASSWORD"
-          echo ""
           echo "Release will continue without Docker push."
 
   # Generate changelog from commits since last tag
@@ -108,24 +107,16 @@ jobs:
       - name: Generate changelog
         id: generate
         run: |
-          # Get previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           CURRENT_TAG=${GITHUB_REF#refs/tags/}
-          
           echo "Generating changelog from $PREV_TAG to $CURRENT_TAG"
-          
           if [ -z "$PREV_TAG" ]; then
-            # First release
             CHANGELOG=$(git log --pretty=format:"- %s" HEAD)
           else
-            # Subsequent releases
             CHANGELOG=$(git log $PREV_TAG..$CURRENT_TAG --pretty=format:"- %s")
           fi
-          
-          # Format for output
           CHANGELOG="${CHANGELOG//'%'/'%25'}"
           CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
-          
           echo "changelog=$CHANGELOG" >> $GITHUB_OUTPUT
           echo "Generated changelog:"
           echo "$CHANGELOG"
@@ -151,8 +142,8 @@ jobs:
             
             ### Docker Images
             Docker images available at:
-            - Backend: `docker.io/<username>/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
-            - Frontend: `docker.io/<username>/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
+            - Backend: `docker.io/${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
+            - Frontend: `docker.io/${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
             
             (Replace `<username>` with your Docker Hub username)
             
@@ -176,20 +167,18 @@ jobs:
   notify-release:
     needs: [parse-version, create-release]
     runs-on: ubuntu-latest
-    if: always()
     steps:
       - name: Notify Slack
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}"
-          MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
-          
+          MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" \
             ${{ secrets.SLACK_WEBHOOK_URL }}
 
       - name: Send email notification
-        if: ${{ secrets.EMAIL_RECIPIENTS != '' }}
+        if: ${{ secrets.EMAIL_RECIPIENTS }}
         uses: davismatejcs/gmail-action@v1
         with:
           to: ${{ secrets.EMAIL_RECIPIENTS }}
@@ -197,7 +186,7 @@ jobs:
           body: |
             Release ${{ needs.parse-version.outputs.version }} has been published!
             
-            Backend Image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
-            Frontend Image: ${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
+            Backend Image: ${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}
+            Frontend Image: ${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}
             
             Release Details: https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}
