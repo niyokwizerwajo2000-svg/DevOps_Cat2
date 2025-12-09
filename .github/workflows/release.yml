@@ -41,11 +41,13 @@ jobs:
       matrix:
         include:
           - dockerfile: ./Dockerfile
-            image-name: ${{ env.DOCKER_USERNAME }}/ticket-booking-backend
+            image-name-suffix: ticket-booking-backend
             context: .
           - dockerfile: ./frontend/Dockerfile
-            image-name: ${{ env.DOCKER_USERNAME }}/ticket-booking-frontend
+            image-name-suffix: ticket-booking-frontend
             context: .
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
     steps:
       - name: Check Docker Hub credentials
         id: check-docker
@@ -55,7 +57,6 @@ jobs:
             echo "skip=true" >> $GITHUB_OUTPUT
           else
             echo "skip=false" >> $GITHUB_OUTPUT
-            echo "DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}" >> $GITHUB_ENV
           fi
 
       - name: Checkout code
@@ -79,10 +80,10 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ${{ matrix.image-name }}:${{ needs.parse-version.outputs.version }}
-            ${{ matrix.image-name }}:latest
-          cache-from: type=registry,ref=${{ matrix.image-name }}:buildcache
-          cache-to: type=registry,ref=${{ matrix.image-name }}:buildcache,mode=max
+            ${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:${{ needs.parse-version.outputs.version }}
+            ${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:latest
+          cache-from: type=registry,ref=${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:buildcache,mode=max
 
       - name: Log if Docker credentials are missing
         if: steps.check-docker.outputs.skip == 'true'
@@ -125,6 +126,8 @@ jobs:
   create-release:
     needs: [parse-version, generate-changelog]
     runs-on: ubuntu-latest
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -142,8 +145,8 @@ jobs:
             
             ### Docker Images
             Docker images available at:
-            - Backend: `docker.io/${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
-            - Frontend: `docker.io/${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
+            - Backend: `docker.io/${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
+            - Frontend: `docker.io/${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
             
             (Replace `<username>` with your Docker Hub username)
             
@@ -167,6 +170,8 @@ jobs:
   notify-release:
     needs: [parse-version, create-release]
     runs-on: ubuntu-latest
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
     steps:
       - name: Notify Slack
         run: |
@@ -174,8 +179,9 @@ jobs:
             echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending release notification."
             exit 0
           fi
+          # Use secrets.DOCKER_USERNAME directly in the message
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}"
-          MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ env.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ env.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
+          MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
           curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" "${{ secrets.SLACK_WEBHOOK_URL }}"
 
       - name: Send email notification
