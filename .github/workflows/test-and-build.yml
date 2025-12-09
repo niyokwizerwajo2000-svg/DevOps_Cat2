@@ -129,7 +129,7 @@ jobs:
           echo "LOWER_REPO=$REPO_LOWER" >> $GITHUB_ENV
           echo "Computed lowercase repo: $REPO_LOWER"
           # Fail early if uppercase characters exist
-          if echo "$REPO_LOWER" | grep -E '[A-Z]' >/dev/null; then
+          if echo "$REPO_LOWER" | grep -q '[A-Z]'; then
             echo "ERROR: Lowercase conversion failed, repo still has uppercase"
             exit 1
           fi
