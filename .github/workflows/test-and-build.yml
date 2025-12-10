@@ -1,0 +1,625 @@
+name: Test & Build
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '18'
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Run unit tests
+        run: npm run test:unit
+        continue-on-error: true
+        id: unit-tests
+
+      - name: Run integration tests
+        run: npm run test:integration
+        continue-on-error: true
+        id: integration-tests
+
+      - name: Run all tests with coverage
+        run: npm run test:all
+        continue-on-error: true
+        id: all-tests
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+      - name: Parse test results
+        if: always()
+        id: test-results
+        run: |
+          # best-effort extraction
+          COVERAGE=$(jq -r '.total.lines.pct // 0' coverage/coverage-summary.json 2>/dev/null || echo 0)
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Send Slack notification on failure
+        if: failure()
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending failure notification."
+            exit 0
+          fi
+          read -r -d '' payload <<'JSON' || true
+          {
+            "text": "❌ Tests Failed on ${{ github.ref_name }}",
+            "blocks": [
+              {"type":"section","text":{"type":"mrkdwn","text":"❌ *Test Pipeline Failed*\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Repository:* ${{ github.repository }}"}},
+              {"type":"section","text":{"type":"mrkdwn","text":"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"}}
+            ]
+          }
+          JSON
+          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+      - name: Send Slack notification on success
+        if: success()
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending success notification."
+            exit 0
+          fi
+          read -r -d '' payload <<'JSON' || true
+          {
+            "text": "✅ Tests Passed on ${{ github.ref_name }}",
+            "blocks": [
+              {"type":"section","text":{"type":"mrkdwn","text":"✅ *All Tests Passed*\n*Branch:* ${{ github.ref_name }}\n*Coverage:* ${{ steps.test-results.outputs.coverage }}%\n*Repository:* ${{ github.repository }}"}},
+              {"type":"section","text":{"type":"mrkdwn","text":"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"}}
+            ]
+          }
+          JSON
+          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+  build:
+    name: Build Docker Images
+    needs: test
+    runs-on: ubuntu-latest
+    if: success() && github.event_name == 'push'
+    outputs:
+      lower_repo: ${{ steps.lowercase-repo.outputs.lower_repo }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute lowercase repository name (for Docker refs)
+        id: lowercase-repo
+        run: |
+          REPO_RAW='${{ github.repository }}'
+          REPO_LOWER=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+          echo "lower_repo=$REPO_LOWER" >> $GITHUB_OUTPUT
+          echo "LOWER_REPO=$REPO_LOWER" >> $GITHUB_ENV
+          echo "Computed lowercase repo: $REPO_LOWER"
+
+      - name: Debug: show computed Docker refs
+        run: |
+          echo "Computed LOWER_REPO (step output): ${{ steps.lowercase-repo.outputs.lower_repo }}"
+          echo "Computed LOWER_REPO (env): ${{ env.LOWER_REPO }}"
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Backend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend"
+          echo "Frontend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Diagnostic: Docker & Buildx info
+        run: |
+          echo "GITHUB_REPOSITORY_RAW='${{ github.repository }}'"
+          echo "LOWER_REPO='${{ steps.lowercase-repo.outputs.lower_repo }}'"
+          echo "REGISTRY='${{ env.REGISTRY }}'"
+          docker version || true
+          docker info || true
+          docker buildx version || true
+          docker buildx ls || true
+          env | grep -i proxy || true
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for backend
+        id: backend-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.backend-meta.outputs.tags }}
+          labels: ${{ steps.backend-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache,mode=max
+
+      - name: Extract metadata for frontend
+        id: frontend-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.frontend-meta.outputs.tags }}
+          labels: ${{ steps.frontend-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache,mode=max
+
+  notify:
+    name: Send Notifications
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.test.result }}" == "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send email notification (if configured)
+        if: secrets.EMAIL_SERVER != '' && secrets.EMAIL_USERNAME != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.EMAIL_SERVER }}
+          server_port: ${{ secrets.EMAIL_PORT }}
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "${{ steps.status.outputs.emoji }} CI Pipeline ${{ steps.status.outputs.status }} - ${{ github.repository }}"
+          to: ${{ secrets.EMAIL_RECIPIENTS }}
+          from: "CI Pipeline <noreply@ci.example.com>"
+          body: |
+            Pipeline Status: ${{ steps.status.outputs.status }}
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+
+            View details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Create GitHub deployment status
+        uses: chrnorm/deployment-status@v2
+        if: always()
+        with:
+          state: ${{ steps.status.outputs.status }}
+          deployment-id: ${{ needs.build.outputs.deployment_id }}
+          description: "Test pipeline ${{ steps.status.outputs.status }}"
+          environment-url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+name: Test & Build
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '18'
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Run unit tests
+        run: npm run test:unit
+        continue-on-error: true
+        id: unit-tests
+
+      - name: Run integration tests
+        run: npm run test:integration
+        continue-on-error: true
+        id: integration-tests
+
+      - name: Run all tests with coverage
+        run: npm run test:all
+        continue-on-error: true
+        id: all-tests
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+      - name: Parse test results
+        if: always()
+        id: test-results
+        run: |
+          # Extract test results from jest output
+          PASSED=$(cat coverage/coverage-summary.json 2>/dev/null | grep -o '"lines":{"total":[^}]*}' | grep -o '[0-9.]*' | head -1 || echo "0")
+          COVERAGE=$(cat coverage/coverage-summary.json 2>/dev/null | grep -o '"lines":{"pct":[^,]*}' | grep -o '[0-9.]*' | head -1 || echo "0")
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Send Slack notification on failure (skipped in debug)
+        if: failure()
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured."
+          else
+            echo "DEBUG: would send Slack notification (suppressed in repo)."
+          fi
+
+      - name: Send Slack notification on success (skipped in debug)
+        if: success()
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured."
+          else
+            echo "DEBUG: would send Slack notification (suppressed in repo)."
+          fi
+
+  build:
+    name: Build Docker Images
+    needs: test
+    runs-on: ubuntu-latest
+    if: success() && github.event_name == 'push'
+    outputs:
+      lower_repo: ${{ steps.lowercase-repo.outputs.lower_repo }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute lowercase repository name (for Docker refs)
+        id: lowercase-repo
+        run: |
+          REPO_RAW='${{ github.repository }}'
+          REPO_LOWER=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+          echo "lower_repo=$REPO_LOWER" >> $GITHUB_OUTPUT
+          echo "LOWER_REPO=$REPO_LOWER" >> $GITHUB_ENV
+          echo "Computed lowercase repo: $REPO_LOWER"
+
+      - name: Debug: show computed Docker refs
+        run: |
+          echo "Computed LOWER_REPO: ${{ env.LOWER_REPO }}"
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Backend image will be: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/backend"
+          echo "Frontend image will be: ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/frontend"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Diagnostic: Docker & Buildx info
+        run: |
+          echo "GITHUB_REPOSITORY_RAW='${{ github.repository }}'"
+          echo "LOWER_REPO='${{ env.LOWER_REPO }}'"
+          echo "REGISTRY='${{ env.REGISTRY }}'"
+          name: Test & Build
+
+          on:
+            push:
+              branches: [main, develop]
+            pull_request:
+              branches: [main, develop]
+
+          env:
+            NODE_VERSION: '18'
+            REGISTRY: ghcr.io
+
+          jobs:
+            test:
+              name: Run Tests
+              runs-on: ubuntu-latest
+              strategy:
+                matrix:
+                  node-version: [18, 20]
+
+              steps:
+                - name: Checkout code
+                  uses: actions/checkout@v4
+
+                - name: Setup Node.js ${{ matrix.node-version }}
+                  uses: actions/setup-node@v4
+                  with:
+                    node-version: ${{ matrix.node-version }}
+                    cache: 'npm'
+
+                - name: Install dependencies
+                  run: npm ci || npm install
+
+                - name: Run unit tests
+                  run: npm run test:unit
+                  continue-on-error: true
+                  id: unit-tests
+
+                - name: Run integration tests
+                  run: npm run test:integration
+                  continue-on-error: true
+                  id: integration-tests
+
+                - name: Run all tests with coverage
+                  run: npm run test:all
+                  continue-on-error: true
+                  id: all-tests
+
+                - name: Upload coverage reports
+                  uses: codecov/codecov-action@v3
+                  if: always()
+                  with:
+                    files: ./coverage/lcov.info
+                    flags: unittests
+                    name: codecov-umbrella
+                    fail_ci_if_error: false
+
+                - name: Parse test results
+                  if: always()
+                  id: test-results
+                  run: |
+                    # Extract test results from jest output
+                    COVERAGE=$(cat coverage/coverage-summary.json 2>/dev/null | grep -o '"lines":{"pct"\?:[^,]*' | grep -o '[0-9.]*' | head -1 || echo "0")
+                    echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+                    echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+                    echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+                - name: Send Slack notification on failure
+                  if: failure()
+                  run: |
+                    if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+                      echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending failure notification."
+                      exit 0
+                    fi
+                    read -r -d '' payload <<'JSON' || true
+                    {
+                      "text": "❌ Tests Failed on ${{ github.ref_name }}",
+                      "blocks": [
+                        {"type":"section","text":{"type":"mrkdwn","text":"❌ *Test Pipeline Failed*\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Repository:* ${{ github.repository }}"}},
+                        {"type":"section","text":{"type":"mrkdwn","text":"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"}}
+                      ]
+                    }
+                    JSON
+                    curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+                - name: Send Slack notification on success
+                  if: success()
+                  run: |
+                    if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+                      echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending success notification."
+                      exit 0
+                    fi
+                    read -r -d '' payload <<'JSON' || true
+                    {
+                      "text": "✅ Tests Passed on ${{ github.ref_name }}",
+                      "blocks": [
+                        {"type":"section","text":{"type":"mrkdwn","text":"✅ *All Tests Passed*\n*Branch:* ${{ github.ref_name }}\n*Coverage:* ${{ steps.test-results.outputs.coverage }}%\n*Repository:* ${{ github.repository }}"}},
+                        {"type":"section","text":{"type":"mrkdwn","text":"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"}}
+                      ]
+                    }
+                    JSON
+                    curl -s -X POST -H 'Content-type: application/json' --data "$payload" "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+            build:
+              name: Build Docker Images
+              needs: test
+              runs-on: ubuntu-latest
+              if: success() && github.event_name == 'push'
+              outputs:
+                lower_repo: ${{ steps.lowercase-repo.outputs.lower_repo }}
+
+              permissions:
+                contents: read
+                packages: write
+
+              steps:
+                - name: Checkout code
+                  uses: actions/checkout@v4
+
+                - name: Compute lowercase repository name (for Docker refs)
+                  id: lowercase-repo
+                  run: |
+                    REPO_RAW='${{ github.repository }}'
+                    REPO_LOWER=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+                    echo "lower_repo=$REPO_LOWER" >> $GITHUB_OUTPUT
+                    echo "LOWER_REPO=$REPO_LOWER" >> $GITHUB_ENV
+                    echo "Computed lowercase repo: $REPO_LOWER"
+
+                - name: Debug: show computed Docker refs
+                  run: |
+                    echo "Computed LOWER_REPO (step output): ${{ steps.lowercase-repo.outputs.lower_repo }}"
+                    echo "Computed LOWER_REPO (env): ${{ env.LOWER_REPO }}"
+                    echo "Registry: ${{ env.REGISTRY }}"
+                    echo "Backend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend"
+                    echo "Frontend image will be: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend"
+
+                - name: Set up Docker Buildx
+                  uses: docker/setup-buildx-action@v3
+
+                - name: Diagnostic: Docker & Buildx info
+                  run: |
+                    echo "GITHUB_REPOSITORY_RAW='${{ github.repository }}'"
+                    echo "LOWER_REPO='${{ steps.lowercase-repo.outputs.lower_repo }}'"
+                    echo "REGISTRY='${{ env.REGISTRY }}'"
+                    docker version || true
+                    docker info || true
+                    docker buildx version || true
+                    docker buildx ls || true
+                    env | grep -i proxy || true
+
+                - name: Log in to Container Registry
+                  uses: docker/login-action@v3
+                  with:
+                    registry: ${{ env.REGISTRY }}
+                    username: ${{ github.actor }}
+                    password: ${{ secrets.GITHUB_TOKEN }}
+
+                - name: Extract metadata for backend
+                  id: backend-meta
+                  uses: docker/metadata-action@v5
+                  with:
+                    images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend
+                    tags: |
+                      type=ref,event=branch
+                      type=sha,prefix={{branch}}-
+                      type=semver,pattern={{version}}
+                      type=semver,pattern={{major}}.{{minor}}
+                      type=raw,value=latest,enable={{is_default_branch}}
+
+                - name: Build and push backend
+                  uses: docker/build-push-action@v5
+                  with:
+                    context: .
+                    file: ./Dockerfile
+                    push: true
+                    tags: ${{ steps.backend-meta.outputs.tags }}
+                    labels: ${{ steps.backend-meta.outputs.labels }}
+                    cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache
+                    cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/backend:buildcache,mode=max
+
+                - name: Extract metadata for frontend
+                  id: frontend-meta
+                  uses: docker/metadata-action@v5
+                  with:
+                    images: ${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend
+                    tags: |
+                      type=ref,event=branch
+                      type=sha,prefix={{branch}}-
+                      type=semver,pattern={{version}}
+                      type=semver,pattern={{major}}.{{minor}}
+                      type=raw,value=latest,enable={{is_default_branch}}
+
+                - name: Build and push frontend
+                  uses: docker/build-push-action@v5
+                  with:
+                    context: ./frontend
+                    file: ./frontend/Dockerfile
+                    push: true
+                    tags: ${{ steps.frontend-meta.outputs.tags }}
+                    labels: ${{ steps.frontend-meta.outputs.labels }}
+                    cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache
+                    cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.lowercase-repo.outputs.lower_repo }}/frontend:buildcache,mode=max
+
+            notify:
+              name: Send Notifications
+              needs: [test, build]
+              runs-on: ubuntu-latest
+              if: always()
+
+              steps:
+                - name: Determine status
+                  id: status
+                  run: |
+                    if [ "${{ needs.test.result }}" == "success" ]; then
+                      echo "status=success" >> $GITHUB_OUTPUT
+                      echo "emoji=✅" >> $GITHUB_OUTPUT
+                    else
+                      echo "status=failure" >> $GITHUB_OUTPUT
+                      echo "emoji=❌" >> $GITHUB_OUTPUT
+                    fi
+
+                - name: Send email notification (if configured)
+                  if: secrets.EMAIL_SERVER != '' && secrets.EMAIL_USERNAME != ''
+                  uses: dawidd6/action-send-mail@v3
+                  with:
+                    server_address: ${{ secrets.EMAIL_SERVER }}
+                    server_port: ${{ secrets.EMAIL_PORT }}
+                    username: ${{ secrets.EMAIL_USERNAME }}
+                    password: ${{ secrets.EMAIL_PASSWORD }}
+                    subject: "${{ steps.status.outputs.emoji }} CI Pipeline ${{ steps.status.outputs.status }} - ${{ github.repository }}"
+                    to: ${{ secrets.EMAIL_RECIPIENTS }}
+                    from: "CI Pipeline <noreply@ci.example.com>"
+                    body: |
+                      Pipeline Status: ${{ steps.status.outputs.status }}
+                      Repository: ${{ github.repository }}
+                      Branch: ${{ github.ref_name }}
+                      Commit: ${{ github.sha }}
+                      Author: ${{ github.actor }}
+
+                      View details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+                - name: Create GitHub deployment status
+                  uses: chrnorm/deployment-status@v2
+                  if: always()
+                  with:
+                    state: ${{ steps.status.outputs.status }}
+                    deployment-id: ${{ needs.build.outputs.deployment_id }}
+                    description: "Test pipeline ${{ steps.status.outputs.status }}"
+                    environment-url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+

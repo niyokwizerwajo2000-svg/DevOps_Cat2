@@ -1,0 +1,194 @@
+name: Release & Deploy
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Semantic versioning: v1.0.0, v1.0.1, etc.
+  # Allow manual runs for testing
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: docker.io
+
+jobs:
+  # Parse version from git tag
+  parse-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      major: ${{ steps.get-version.outputs.major }}
+      minor: ${{ steps.get-version.outputs.minor }}
+      patch: ${{ steps.get-version.outputs.patch }}
+    steps:
+      - name: Get version from tag
+        id: get-version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          MAJOR=$(echo $VERSION | cut -d'.' -f1 | sed 's/v//')
+          MINOR=$(echo $VERSION | cut -d'.' -f2)
+          PATCH=$(echo $VERSION | cut -d'.' -f3)
+          echo "major=${MAJOR}" >> $GITHUB_OUTPUT
+          echo "minor=${MINOR}" >> $GITHUB_OUTPUT
+          echo "patch=${PATCH}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+  # Build and push Docker images (always runs, but skips if secrets missing)
+  build-and-push:
+    needs: parse-version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: ./Dockerfile
+            image-name-suffix: ticket-booking-backend
+            context: .
+          - dockerfile: ./frontend/Dockerfile
+            image-name-suffix: ticket-booking-frontend
+            context: .
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+    steps:
+      - name: Check Docker Hub credentials
+        id: check-docker
+        run: |
+          if [ -z "${{ secrets.DOCKER_USERNAME }}" ] || [ -z "${{ secrets.DOCKER_PASSWORD }}" ]; then
+            echo "Docker credentials missing, skipping Docker build/push."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.check-docker.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        if: steps.check-docker.outputs.skip == 'false'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:${{ needs.parse-version.outputs.version }}
+            ${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:latest
+          cache-from: type=registry,ref=${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_USERNAME }}/${{ matrix.image-name-suffix }}:buildcache,mode=max
+
+      - name: Log if Docker credentials are missing
+        if: steps.check-docker.outputs.skip == 'true'
+        run: |
+          echo "⚠️  Docker Hub credentials not configured."
+          echo "To push images to Docker Hub, configure GitHub Secrets:"
+          echo "  - DOCKER_USERNAME (your Docker Hub username)"
+          echo "  - DOCKER_PASSWORD (your Docker Hub access token or password)"
+          echo "Release will continue without Docker push."
+
+  # Generate changelog from commits since last tag
+  generate-changelog:
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.generate.outputs.changelog }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
+
+      - name: Generate changelog
+        id: generate
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          echo "Generating changelog from $PREV_TAG to $CURRENT_TAG"
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" HEAD)
+          else
+            CHANGELOG=$(git log $PREV_TAG..$CURRENT_TAG --pretty=format:"- %s")
+          fi
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          echo "changelog=$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "Generated changelog:"
+          echo "$CHANGELOG"
+
+  # Create GitHub Release with changelog
+  create-release:
+    needs: [parse-version, generate-changelog]
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.parse-version.outputs.version }}
+          name: Release ${{ needs.parse-version.outputs.version }}
+          body: |
+            ## Release ${{ needs.parse-version.outputs.version }}
+            
+            ### What's Changed
+            ${{ needs.generate-changelog.outputs.changelog }}
+            
+            ### Docker Images
+            Docker images available at:
+            - Backend: `docker.io/${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}`
+            - Frontend: `docker.io/${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}`
+            
+            (Replace `<username>` with your Docker Hub username)
+            
+            ### Build Docker Images Locally
+            ```bash
+            # Backend
+            docker build -t ticket-booking-backend:${{ needs.parse-version.outputs.version }} .
+            
+            # Frontend
+            docker build -t ticket-booking-frontend:${{ needs.parse-version.outputs.version }} ./frontend
+            ```
+            
+            ### Run with Docker Compose
+            Update your docker-compose.yml to use the new version tag or build from this release.
+            
+            **Note:** Docker Hub push requires DOCKER_USERNAME and DOCKER_PASSWORD secrets configured in GitHub.
+          draft: false
+          prerelease: false
+
+  # Notify team of release
+  notify-release:
+    needs: [parse-version, create-release]
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+    steps:
+      - name: Notify Slack
+        run: |
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo "SKIP: SLACK_WEBHOOK_URL not configured, not sending release notification."
+            exit 0
+          fi
+          # Use secrets.DOCKER_USERNAME directly in the message
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ needs.parse-version.outputs.version }}"
+          MESSAGE="🎉 Release ${{ needs.parse-version.outputs.version }} published!\n\nBackend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-backend:${{ needs.parse-version.outputs.version }}\`\nFrontend: \`${{ secrets.DOCKER_USERNAME }}/ticket-booking-frontend:${{ needs.parse-version.outputs.version }}\`"
+          curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$MESSAGE\",\"mrkdwn\":true}" "${{ secrets.SLACK_WEBHOOK_URL }}"
+
+      - name: Send email notification
+        run: |
+          if [ -z "${{ secrets.EMAIL_RECIPIENTS }}" ] || [ -z "${{ secrets.EMAIL_SERVER }}" ] || [ -z "${{ secrets.EMAIL_USERNAME }}" ] || [ -z "${{ secrets.EMAIL_PASSWORD }}" ]; then
+            echo "SKIP: Email credentials not configured, not sending email notification."
+            exit 0
+          fi
+          # Email sending logic here (requires SMTP configuration)
+          echo "Email notification would be sent to: ${{ secrets.EMAIL_RECIPIENTS }}"
