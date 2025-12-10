@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: ticket-booking
+  labels:
+    app: ticket-booking-system
+    component: configuration
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  API_TIMEOUT: "30000"
+  PORT: "3000"
+  DATABASE_HOST: "mysql-service.ticket-booking.svc.cluster.local"
+  DATABASE_PORT: "3306"
+  DATABASE_NAME: "ticket_db"
+  VITE_API_URL: "http://backend-service.ticket-booking.svc.cluster.local:3000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: ticket-booking
+  labels:
+    app: ticket-booking-system
+    component: database
+data:
+  mysql.conf: |
+    [mysqld]
+    default-storage-engine=InnoDB
+    max_connections=100
+    character-set-server=utf8mb4
+    collation-server=utf8mb4_unicode_ci
+    log-bin=/var/log/mysql/mysql-bin.log
+    server-id=1
